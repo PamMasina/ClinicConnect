@@ -81,18 +81,29 @@ export async function sendPatientAppointmentReminder(
   preference: string | null | undefined,
   now: Date = new Date()
 ): Promise<void> {
-  
-    const start = getSlotStart(appointment);
+  const start = getSlotStart(appointment);
   if (!start) return; // no date/time to work from
 
   const sendAt = getReminderSendAt(`${start.date}T${start.time}`, preference, now);
-
   if (!sendAt) return; // reminder not due yet
 
-  // Only send each reminder once per app session.
-  const sentKey = `${appointment.id}:${preference ?? 'day_before'}`;
+  const kind = preference ?? 'day_before';
+
+  // Fast in-session guard.
+  const sentKey = `${appointment.id}:${kind}`;
   if (reminderSentFor.has(sentKey)) return;
   reminderSentFor.add(sentKey);
+
+  // Durable guard: skip if this reminder was already created in an earlier
+  // session or on another device.
+  const { data: existing } = await supabase
+    .from('notifications')
+    .select('id')
+    .eq('user_id', patientUserId)
+    .eq('type', 'appointment_reminder')
+    .contains('data', { appointmentId: appointment.id, reminderKind: kind })
+    .limit(1);
+  if (existing && existing.length > 0) return;
 
   const startTime = start.time.slice(0, 5);
   const clinicName = appointment.clinics?.clinic_name ?? 'clinic';
@@ -104,6 +115,7 @@ export async function sendPatientAppointmentReminder(
     data: {
       type: 'appointment_reminder',
       appointmentId: appointment.id,
+      reminderKind: kind,
     },
   });
 
@@ -111,7 +123,6 @@ export async function sendPatientAppointmentReminder(
     console.log('[Reminders] Sent appointment reminder to patient', patientUserId);
   }
 }
-
 /**
  * Send the morning summary to a single staff member.
  * Only sends if the staff member has appointments that day.
