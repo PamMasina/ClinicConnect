@@ -29,7 +29,7 @@ export default function AppointmentHistoryScreen() {
     try {
       const { data, error } = await supabase
         .from('appointments')
-        .select('*, clinics(clinic_name), services(service_name)')
+        .select('*, clinics(clinic_name), services(service_name), time_slots(date, start_time, end_time)')
         .eq('patient_id', profile.id)
         .order('created_at', { ascending: false });
       if (error) throw error;
@@ -72,7 +72,7 @@ export default function AppointmentHistoryScreen() {
                 <Text style={styles.clinic}>{item.clinics?.clinic_name || 'Clinic'}</Text>
                 <Text style={styles.service}>{item.services?.service_name || 'Service'}</Text>
                 <Text style={styles.meta}>
-                  {item.appointment_date || item.created_at?.slice(0, 10)} · {item.start_time || '—'}
+                  {item.time_slots?.date || item.appointment_date || item.created_at?.slice(0, 10)} · {(item.time_slots?.start_time || item.start_time || '—').slice(0, 5)}
                 </Text>
               </View>
               <View style={[styles.badge, statusColor(item.status)]}>
