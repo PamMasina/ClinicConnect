@@ -253,6 +253,7 @@ export interface NotificationPreference {
   sms: boolean;
   email: boolean;
   inApp: boolean;
+  appointment_reminder?: 'day_before' | '30_min_before';
 }
 
 export interface Patient {
