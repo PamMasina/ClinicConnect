@@ -1,7 +1,6 @@
 import { Platform, Share } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 
-
 export async function shareOrDownloadText(filename: string, text: string): Promise<void> {
   if (Platform.OS === 'web') {
     const g = globalThis as any;
@@ -19,10 +18,7 @@ export async function shareOrDownloadText(filename: string, text: string): Promi
   await Share.share({ title: filename, message: text });
 }
 
-
-export async function shareOrDownloadPdf(filename: string, html: string): Promise<void> {
-  const pdfName = filename.toLowerCase().endsWith('.pdf') ? filename : `${filename}.pdf`;
-
+function loadPdfLibs(): { Print: any; Sharing: any; printToFile: any } {
   let Print: any;
   let Sharing: any;
   try {
@@ -35,53 +31,82 @@ export async function shareOrDownloadPdf(filename: string, html: string): Promis
   }
 
   const printToFile =
-    Print.printToFileAsync ||
-    (Print.default && Print.default.printToFileAsync);
+    Print.printToFileAsync || (Print.default && Print.default.printToFileAsync);
 
   if (typeof printToFile !== 'function') {
     throw new Error(
       'expo-print is installed but printToFileAsync is missing.\n\nStop the app and run:\nnpx expo install expo-print expo-sharing\nnpx expo start -c'
     );
   }
+  return { Print, Sharing, printToFile };
+}
 
-  // 1. Generate the PDF
-  //    Ask for base64 too: on Android (Expo Go) the file expo-print writes
-  //    is outside the app sandbox and cannot be read back by FileSystem.
-  const { uri: tempUri, base64: printedBase64 } = await printToFile({
-    html,
-    base64: Platform.OS !== 'web',
-  });
+function makeSafeName(pdfName: string): string {
+  // Spaces, slashes, colons etc. produce an invalid file:// URI.
+  return (
+    pdfName.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'document.pdf'
+  );
+}
 
-  if (Platform.OS === 'web') {
-    const g = globalThis as any;
-    try {
-      const response = await fetch(tempUri);
-      const blob = await response.blob();
-      const url = g.URL.createObjectURL(blob);
-      const a = g.document.createElement('a');
-      a.href = url;
-      a.download = pdfName;
-      g.document.body.appendChild(a);
-      a.click();
-      a.remove();
-      g.URL.revokeObjectURL(url);
-    } catch {
-      g.window.open(tempUri, '_blank');
+/** Open the native print preview (iOS can view / save-as-PDF from here). */
+export async function viewPdf(html: string): Promise<void> {
+  const { Print } = loadPdfLibs();
+  const printAsync = Print.printAsync || (Print.default && Print.default.printAsync);
+  if (typeof printAsync !== 'function') {
+    throw new Error('Viewing is not available on this device.');
+  }
+  await printAsync({ html });
+}
+
+async function sharePdfIos(pdfName: string, html: string): Promise<void> {
+  const { Print, Sharing, printToFile } = loadPdfLibs();
+
+  // On iOS the file expo-print writes is already readable by the share sheet,
+  // so no base64 round trip is needed.
+  const { uri } = await printToFile({ html });
+  let shareUri: string = uri;
+
+  // Give the file a proper name so Files / Mail show "prescription-xxxx.pdf".
+  try {
+    const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+    if (dir) {
+      const target = `${dir}${makeSafeName(pdfName)}`;
+      await FileSystem.deleteAsync(target, { idempotent: true });
+      await FileSystem.copyAsync({ from: uri, to: target });
+      shareUri = target;
     }
-    return;
+  } catch (copyErr) {
+    console.warn('[PDF] Could not rename PDF, sharing original file:', copyErr);
   }
 
-  // 2. Move the PDF into a normal cache path that Android can share.
-  //    expo-print writes under cache/Print/ which is often unreadable to
-  //    Sharing / copyAsync on Android (especially Expo Go).
-  //    Reading as base64 + rewriting is the most reliable workaround.
-  // Sanitise the name: spaces, slashes, colons etc. produce an invalid
-  // file:// URI, which expo-sharing then reports as "Not allowed to read
-  // file under given URL".
-  const safeName = pdfName
-    .replace(/[^A-Za-z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '') || 'document.pdf';
+  try {
+    const shareAsync = Sharing.shareAsync || (Sharing.default && Sharing.default.shareAsync);
+    if (typeof shareAsync !== 'function') throw new Error('Sharing is not available.');
+    await shareAsync(shareUri, {
+      mimeType: 'application/pdf',
+      UTI: 'com.adobe.pdf',
+      dialogTitle: 'Save or share',
+    });
+  } catch (shareErr) {
+    console.warn('[PDF] Share sheet failed on iOS, opening print preview instead:', shareErr);
+    // The native preview lets the user view the PDF and save it from the share icon.
+    const printAsync = Print.printAsync || (Print.default && Print.default.printAsync);
+    if (typeof printAsync !== 'function') throw shareErr;
+    await printAsync({ html });
+  }
+}
 
+async function sharePdfAndroid(pdfName: string, html: string): Promise<void> {
+  const { Sharing, printToFile } = loadPdfLibs();
+
+  // expo-print writes outside the app sandbox on Android (especially Expo Go),
+  // so ask for base64 and write our own copy into the cache dir.
+  const { uri: tempUri, base64: printedBase64 } = await printToFile({
+    html,
+    base64: true,
+  });
+
+  const safeName = makeSafeName(pdfName);
   const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
   if (!baseDir) {
     throw new Error('No writable directory available to store the PDF.');
@@ -90,8 +115,6 @@ export async function shareOrDownloadPdf(filename: string, html: string): Promis
 
   await FileSystem.deleteAsync(shareableUri, { idempotent: true });
 
-  // Always read the generated file and write a fresh copy in our own
-  // cache dir (an app-owned location expo-sharing is allowed to read).
   const base64: string =
     printedBase64 ||
     (await FileSystem.readAsStringAsync(tempUri, {
@@ -105,9 +128,7 @@ export async function shareOrDownloadPdf(filename: string, html: string): Promis
   if (!written.exists) {
     throw new Error('Could not save the PDF before sharing.');
   }
-  const finalUri = shareableUri;
 
-  // 3. Open the system share sheet
   const isAvailableFn =
     Sharing.isAvailableAsync ||
     (Sharing.default && Sharing.default.isAvailableAsync);
@@ -117,12 +138,50 @@ export async function shareOrDownloadPdf(filename: string, html: string): Promis
   const canShare = typeof isAvailableFn === 'function' ? await isAvailableFn() : false;
 
   if (canShare && typeof shareAsyncFn === 'function') {
-    await shareAsyncFn(finalUri, {
+    await shareAsyncFn(shareableUri, {
       mimeType: 'application/pdf',
-      dialogTitle: 'Save or share prescription',
+      dialogTitle: 'Save or share',
       UTI: 'com.adobe.pdf',
     });
   } else {
-    await Share.share({ title: pdfName, url: finalUri });
+    await Share.share({ title: pdfName, url: shareableUri });
+  }
+}
+
+async function sharePdfWeb(pdfName: string, html: string): Promise<void> {
+  const { printToFile } = loadPdfLibs();
+  const { uri: tempUri } = await printToFile({ html });
+  const g = globalThis as any;
+  try {
+    const response = await fetch(tempUri);
+    const blob = await response.blob();
+    const url = g.URL.createObjectURL(blob);
+    const a = g.document.createElement('a');
+    a.href = url;
+    a.download = pdfName;
+    g.document.body.appendChild(a);
+    a.click();
+    a.remove();
+    g.URL.revokeObjectURL(url);
+  } catch {
+    g.window.open(tempUri, '_blank');
+  }
+}
+
+export async function shareOrDownloadPdf(filename: string, html: string): Promise<void> {
+  const pdfName = filename.toLowerCase().endsWith('.pdf') ? filename : `${filename}.pdf`;
+
+  try {
+    if (Platform.OS === 'web') {
+      await sharePdfWeb(pdfName, html);
+    } else if (Platform.OS === 'ios') {
+      await sharePdfIos(pdfName, html);
+    } else {
+      await sharePdfAndroid(pdfName, html);
+    }
+  } catch (e) {
+    // Callers fall back to plain text on failure; log the real reason first.
+    console.warn(`[PDF] Failed on ${Platform.OS}:`, e);
+    throw e;
   }
 }
