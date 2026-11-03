@@ -73,7 +73,7 @@ export default function PatientHomeScreen() {
     try {
       const { data, error } = await supabase
         .from('appointments')
-        .select('*, clinics(clinic_name), services(service_name)')
+        .select('*, clinics(clinic_name), services(service_name), time_slots(date, start_time, end_time)')
         .eq('patient_id', profile.id)
         .in('status', ['booked', 'confirmed'])
         .order('created_at', { ascending: false })
@@ -244,8 +244,8 @@ export default function PatientHomeScreen() {
                       </Text>
                       <Text style={[styles.activityTimestamp, { color: theme.colors.textSecondary }]}>
                         {apt.services?.service_name || 'Consultation'} ·{' '}
-                        {apt.appointment_date || apt.created_at?.slice(0, 10)} ·{' '}
-                        {apt.start_time || '—'}
+                        {apt.time_slots?.date || apt.appointment_date || apt.created_at?.slice(0, 10)} ·{' '}
+                        {(apt.time_slots?.start_time || apt.start_time || '—').slice(0, 5)}
                       </Text>
                     </View>
                     <View style={[styles.badge, { backgroundColor: st.bg }]}>
