@@ -16,6 +16,7 @@ import {
   prescriptionsApi,
   Prescription,
   effectiveStatus,
+  prescriberOf,
 } from '../../services/api/prescriptions';
 import { shareOrDownloadPdf, shareOrDownloadText } from '../../utils/shareText';
 import { notify } from '../../utils/dialogs';
@@ -128,9 +129,10 @@ export default function PrescriptionScreen() {
 
   const status = effectiveStatus(rx);
   const chip = STATUS_CHIP[status];
-  const doctor = rx.doctor
-    ? `Dr ${rx.doctor.first_name || ''} ${rx.doctor.last_name || ''}`.trim()
-    : 'Doctor';
+  const prescriber = prescriberOf(rx);
+  const doctor = prescriber.specialization
+    ? `${prescriber.name} · ${prescriber.specialization}`
+    : prescriber.name;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -160,6 +162,9 @@ export default function PrescriptionScreen() {
         <View style={styles.card}>
           <Text style={styles.cardLabel}>DETAILS</Text>
           <Row label="Issued by" value={doctor} />
+          {prescriber.licenseNumber ? (
+            <Row label="Registration no." value={prescriber.licenseNumber} />
+          ) : null}
           <Row label="Date issued" value={fmtDate(rx.issued_at || rx.created_at)} />
           <Row label="Valid until" value={fmtDate(rx.valid_until)} />
           {rx.diagnosis ? <Row label="Diagnosis" value={rx.diagnosis} /> : null}
