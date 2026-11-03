@@ -21,10 +21,11 @@ export interface PatientProfile {
   next_of_kin_name?: string;
   next_of_kin_relation?: string;
   next_of_kin_contact?: string;
-  notification_preference?: {
+    notification_preference?: {
     sms?: boolean;
     email?: boolean;
     inApp?: boolean;
+    appointment_reminder?: 'day_before' | '30_min_before';
   };
   medical_aid_number?: string;
   medical_aid_plan?: string;
