@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React from "react";
 import {
   View,
   Text,
@@ -6,613 +6,548 @@ import {
   TouchableOpacity,
   StyleSheet,
   SafeAreaView,
-  ActivityIndicator,
-  RefreshControl,
-  TextInput,
-  Alert,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { useAuth } from '../../context/AuthContext';
-import {
-  referralsApi,
-  Referral,
-  ReferralStatus,
-  ReferralUrgency,
-  SPECIALIST_TYPES,
-  CreateReferralInput,
-} from '../../services/api/referrals';
-import { shareOrDownloadPdf, shareOrDownloadText } from '../../utils/shareText';
-import { notify } from '../../utils/dialogs';
-import { RootStackParamList } from '../../navigation/types';
+} from "react-native";
 
-type Nav = NativeStackNavigationProp<RootStackParamList>;
 
-const STATUS_CHIP: Record<
-  ReferralStatus,
-  { label: string; bg: string; fg: string }
-> = {
-  pending: { label: 'Pending', bg: '#FFF3E0', fg: '#E65100' },
-  accepted: { label: 'Accepted', bg: '#E3F2FD', fg: '#1565C0' },
-  scheduled: { label: 'Scheduled', bg: '#E8F5E9', fg: '#2E7D32' },
-  completed: { label: 'Completed', bg: '#F3E5F5', fg: '#7B1FA2' },
-  cancelled: { label: 'Cancelled', bg: '#FFEBEE', fg: '#C62828' },
-};
 
-const URGENCY_COLOR: Record<ReferralUrgency, string> = {
-  routine: '#2d7a4f',
-  urgent: '#e6a817',
-  emergency: '#C62828',
-};
+type ReferralStatus = "pending" | "approved";
 
-function fmtDate(d?: string | null) {
-  if (!d) return '—';
-  return new Date(d).toLocaleDateString('en-ZA', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
+interface Specialist {
+  name: string;
+  specialty: string;
+  clinic: string;
 }
 
-export default function ReferralScreen() {
-  const navigation = useNavigation<Nav>();
-  const route = useRoute<any>();
-  const { role, profile } = useAuth();
-
-  const patientIdParam: string | undefined = route.params?.patientId;
-  const referralIdParam: string | undefined = route.params?.referralId;
-  const mode: 'list' | 'create' = route.params?.mode === 'create' ? 'create' : 'list';
-
-  const isDoctor = role === 'Doctor';
-  /** Doctors and nurses may issue referrals */
-  const canRefer = role === 'Doctor' || role === 'Nurse';
-
-  const patientId =
-    patientIdParam || (role === 'patient' ? profile?.id : undefined);
-
-  const [items, setItems] = useState<Referral[]>([]);
-  const [selected, setSelected] = useState<Referral | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const [showCreate, setShowCreate] = useState(mode === 'create' && canRefer);
-  const [specialistType, setSpecialistType] =
-    useState<(typeof SPECIALIST_TYPES)[number]>(SPECIALIST_TYPES[0]);
-  const [specialistName, setSpecialistName] = useState('');
-  const [reason, setReason] = useState('');
-  const [clinicalNotes, setClinicalNotes] = useState('');
-  const [urgency, setUrgency] = useState<ReferralUrgency>('routine');
-
-  const patientName = profile
-    ? `${profile.first_name || ''} ${profile.last_name || ''}`.trim()
-    : undefined;
-
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      let rows: Referral[] = [];
-
-      if (referralIdParam) {
-        const one = await referralsApi.getById(referralIdParam);
-        rows = one ? [one] : [];
-        if (one) setSelected(one);
-      } else if (patientId) {
-        rows = await referralsApi.getByPatient(patientId);
-      } else if (isDoctor && profile?.id) {
-        rows = await referralsApi.getByDoctor(profile.id);
-      }
-
-      setItems(rows);
-      if (rows.length === 1 && referralIdParam) {
-        setSelected(rows[0]);
-      }
-    } catch (e: any) {
-      console.error('Failed to load referrals:', e);
-      setError(e?.message || 'Could not load referrals.');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [patientId, referralIdParam, isDoctor, profile?.id]);
-
-  useFocusEffect(
-    useCallback(() => {
-      setLoading(true);
-      load();
-    }, [load])
-  );
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    load();
-  };
-
-  const download = async (ref: Referral) => {
-    try {
-      setBusy(true);
-      const text = referralsApi.formatAsText(ref, patientName);
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>
-        body{font-family:-apple-system,sans-serif;padding:24px;color:#222;line-height:1.5}
-        h1{color:#6B7C5C;font-size:18px;margin:0 0 8px}
-        pre{white-space:pre-wrap;font-family:inherit;font-size:13px}
-      </style></head><body>
-        <h1>Clinic-Connect Specialist Referral</h1>
-        <pre>${text
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')}</pre>
-      </body></html>`;
-
-      try {
-        await shareOrDownloadPdf(`referral-${ref.id.slice(0, 8)}.pdf`, html);
-      } catch {
-        await shareOrDownloadText(`referral-${ref.id.slice(0, 8)}.txt`, text);
-      }
-    } catch (e: any) {
-      notify('Could not download', e?.message || 'Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submitCreate = async () => {
-    if (!patientId) {
-      Alert.alert('Error', 'No patient selected.');
-      return;
-    }
-    if (!reason.trim()) {
-      Alert.alert('Missing info', 'Please enter a reason for the referral.');
-      return;
-    }
-    try {
-      setBusy(true);
-      const input: CreateReferralInput = {
-        patient_id: patientId,
-        referring_doctor_id: profile?.id,
-        specialist_type: specialistType,
-        specialist_name: specialistName.trim() || undefined,
-        reason: reason.trim(),
-        clinical_notes: clinicalNotes.trim() || undefined,
-        urgency,
-      };
-      const created = await referralsApi.create(input);
-      setShowCreate(false);
-      setReason('');
-      setClinicalNotes('');
-      setSpecialistName('');
-      setUrgency('routine');
-      await load();
-      setSelected(created);
-      notify('Referral created', 'The referral has been issued.');
-    } catch (e: any) {
-      notify('Could not create referral', e?.message || 'Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const updateStatus = async (ref: Referral, status: ReferralStatus) => {
-    try {
-      setBusy(true);
-      await referralsApi.updateStatus(ref.id, status);
-      await load();
-      if (selected?.id === ref.id) {
-        setSelected({ ...ref, status });
-      }
-    } catch (e: any) {
-      notify('Could not update', e?.message || 'Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color="#6B7C5C" />
-          <Text style={styles.muted}>Loading referrals…</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // ── Create form (Doctor + Nurse) ───────────────────────────────────
-  if (showCreate && canRefer) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity style={styles.backRow} onPress={() => setShowCreate(false)}>
-            <Ionicons name="arrow-back" size={22} color="#2D3A2B" />
-            <Text style={styles.backLabel}>Cancel</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.title}>New specialist referral</Text>
-          <Text style={styles.sub}>Issue a referral for this patient</Text>
-
-          <Text style={styles.label}>Specialist type</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-            {SPECIALIST_TYPES.map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[styles.chip, specialistType === t && styles.chipOn]}
-                onPress={() => setSpecialistType(t)}
-              >
-                <Text style={[styles.chipText, specialistType === t && styles.chipTextOn]}>{t}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          <Text style={styles.label}>Preferred specialist (optional)</Text>
-          <TextInput
-            style={styles.input}
-            value={specialistName}
-            onChangeText={setSpecialistName}
-            placeholder="e.g. Dr A. Petersen"
-            placeholderTextColor="#999"
-          />
-
-          <Text style={styles.label}>Urgency</Text>
-          <View style={styles.row}>
-            {(['routine', 'urgent', 'emergency'] as ReferralUrgency[]).map((u) => (
-              <TouchableOpacity
-                key={u}
-                style={[styles.chip, urgency === u && styles.chipOn]}
-                onPress={() => setUrgency(u)}
-              >
-                <Text style={[styles.chipText, urgency === u && styles.chipTextOn]}>
-                  {u.charAt(0).toUpperCase() + u.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.label}>Reason for referral *</Text>
-          <TextInput
-            style={[styles.input, styles.textarea]}
-            value={reason}
-            onChangeText={setReason}
-            placeholder="Clinical reason…"
-            placeholderTextColor="#999"
-            multiline
-          />
-
-          <Text style={styles.label}>Clinical notes (optional)</Text>
-          <TextInput
-            style={[styles.input, styles.textarea]}
-            value={clinicalNotes}
-            onChangeText={setClinicalNotes}
-            placeholder="Additional notes for the specialist…"
-            placeholderTextColor="#999"
-            multiline
-          />
-
-          <TouchableOpacity
-            style={[styles.primaryBtn, busy && { opacity: 0.6 }]}
-            onPress={submitCreate}
-            disabled={busy}
-          >
-            {busy ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.primaryBtnText}>Issue referral</Text>
-            )}
-          </TouchableOpacity>
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  // ── Detail ─────────────────────────────────────────────────────────
-  if (selected) {
-    const ref = selected;
-    const chip = STATUS_CHIP[ref.status] || STATUS_CHIP.pending;
-    const doctor = ref.referring_doctor
-      ? `Dr ${ref.referring_doctor.first_name || ''} ${ref.referring_doctor.last_name || ''}`.trim()
-      : 'Doctor';
-    const clinic =
-      ref.preferred_clinic?.clinic_name ||
-      ref.specialist_name ||
-      'Any suitable facility';
-
-    return (
-      <SafeAreaView style={styles.safe}>
-        <ScrollView
-          contentContainerStyle={styles.container}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#6B7C5C']} />
-          }
-        >
-          <TouchableOpacity style={styles.backRow} onPress={() => setSelected(null)}>
-            <Ionicons name="arrow-back" size={22} color="#2D3A2B" />
-            <Text style={styles.backLabel}>All referrals</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.title}>Specialist referral</Text>
-          <Text style={styles.sub}>ID {ref.id.slice(0, 8).toUpperCase()}</Text>
-
-          <View style={[styles.badge, { backgroundColor: chip.bg }]}>
-            <Text style={[styles.badgeText, { color: chip.fg }]}>{chip.label}</Text>
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>REFERRED TO</Text>
-            <Text style={styles.big}>{ref.specialist_type}</Text>
-            {ref.specialist_name ? (
-              <Text style={styles.muted}>{ref.specialist_name}</Text>
-            ) : null}
-            <Text style={styles.muted}>{clinic}</Text>
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>DETAILS</Text>
-            <Row label="Referred by" value={doctor} />
-            <Row label="Date issued" value={fmtDate(ref.referred_at || ref.created_at)} />
-            <Row
-              label="Urgency"
-              value={ref.urgency.charAt(0).toUpperCase() + ref.urgency.slice(1)}
-              valueColor={URGENCY_COLOR[ref.urgency]}
-            />
-            <Row label="Status" value={chip.label} />
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>REASON</Text>
-            <Text style={styles.bodyText}>{ref.reason}</Text>
-            {ref.clinical_notes ? (
-              <>
-                <Text style={[styles.cardLabel, { marginTop: 12 }]}>CLINICAL NOTES</Text>
-                <Text style={styles.bodyText}>{ref.clinical_notes}</Text>
-              </>
-            ) : null}
-          </View>
-
-          <TouchableOpacity
-            style={[styles.primaryBtn, busy && { opacity: 0.6 }]}
-            onPress={() => download(ref)}
-            disabled={busy}
-          >
-            {busy ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <>
-                <Ionicons name="download-outline" size={18} color="#fff" />
-                <Text style={styles.primaryBtnText}>Download referral letter</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          {isDoctor && ref.status === 'pending' ? (
-            <View style={styles.row}>
-              <TouchableOpacity
-                style={[styles.outlineBtn, { flex: 1 }]}
-                onPress={() => updateStatus(ref, 'accepted')}
-                disabled={busy}
-              >
-                <Text style={styles.outlineBtnText}>Mark accepted</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.outlineBtn, { flex: 1, borderColor: '#C62828' }]}
-                onPress={() => updateStatus(ref, 'cancelled')}
-                disabled={busy}
-              >
-                <Text style={[styles.outlineBtnText, { color: '#C62828' }]}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  // ── List ───────────────────────────────────────────────────────────
-  return (
-    <SafeAreaView style={styles.safe}>
-      <ScrollView
-        contentContainerStyle={styles.container}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#6B7C5C']} />
-        }
-      >
-        <TouchableOpacity style={styles.backRow} onPress={() => navigation.goBack()}>
-          <Ionicons name="arrow-back" size={22} color="#2D3A2B" />
-          <Text style={styles.backLabel}>Back</Text>
-        </TouchableOpacity>
-
-        <View style={styles.headerRow}>
-          <View>
-            <Text style={styles.title}>Referrals</Text>
-            <Text style={styles.sub}>
-              {patientId ? 'Specialist referrals for this patient' : 'Your specialist referrals'}
-            </Text>
-          </View>
-          {canRefer && patientId ? (
-            <TouchableOpacity style={styles.addBtn} onPress={() => setShowCreate(true)}>
-              <Ionicons name="add" size={22} color="#fff" />
-            </TouchableOpacity>
-          ) : null}
-        </View>
-
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-
-        {items.length === 0 ? (
-          <View style={styles.center}>
-            <Ionicons name="document-text-outline" size={48} color="#CCC" />
-            <Text style={styles.muted}>No referrals yet</Text>
-            {canRefer && patientId ? (
-              <TouchableOpacity style={styles.primaryBtn} onPress={() => setShowCreate(true)}>
-                <Text style={styles.primaryBtnText}>Create referral</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        ) : (
-          items.map((ref) => {
-            const chip = STATUS_CHIP[ref.status] || STATUS_CHIP.pending;
-            return (
-              <TouchableOpacity
-                key={ref.id}
-                style={styles.listCard}
-                onPress={() => setSelected(ref)}
-                activeOpacity={0.7}
-              >
-                <View style={styles.listHead}>
-                  <Text style={styles.listTitle}>{ref.specialist_type}</Text>
-                  <View style={[styles.miniBadge, { backgroundColor: chip.bg }]}>
-                    <Text style={[styles.miniBadgeText, { color: chip.fg }]}>{chip.label}</Text>
-                  </View>
-                </View>
-                <Text style={styles.muted}>
-                  {fmtDate(ref.referred_at || ref.created_at)} ·{' '}
-                  <Text style={{ color: URGENCY_COLOR[ref.urgency], fontWeight: '600' }}>
-                    {ref.urgency}
-                  </Text>
-                </Text>
-                <Text style={styles.listReason} numberOfLines={2}>
-                  {ref.reason}
-                </Text>
-              </TouchableOpacity>
-            );
-          })
-        )}
-      </ScrollView>
-    </SafeAreaView>
-  );
+interface AppointmentInfo {
+  date: string;
+  time: string;
+  room: string;
+  bringItems: string;
 }
 
-function Row({
-  label,
-  value,
-  valueColor,
-}: {
+interface ReferralData {
+  referralId: string;
+  issuedBy: string;
+  issuingClinic: string;
+  dateIssued: string;
+  priority: "Routine" | "Urgent" | "Emergency";
+  specialist: Specialist;
+  reason: string;
+  status: ReferralStatus;
+  appointment?: AppointmentInfo;
+}
+
+interface ReferralScreenProps {
+  referral?: ReferralData;
+  onBack?: () => void;
+  onContactClinic?: () => void;
+  onDownloadLetter?: () => void;
+  onAddToCalendar?: () => void;
+}
+
+
+const DEFAULT_REFERRAL: ReferralData = {
+  referralId: "REF-2026-004821",
+  issuedBy: "Dr. N. Dlamini",
+  issuingClinic: "Mitchells Plain Community Health Centre",
+  dateIssued: "28 Oct 2026",
+  priority: "Urgent",
+  specialist: {
+    name: "Dr. A. Petersen",
+    specialty: "Cardiologist",
+    clinic: "Groote Schuur Hospital",
+  },
+  reason:
+    "Patient presents with persistent chest pain and shortness of breath. Further cardiac investigation required.",
+  status: "pending",
+};
+
+
+interface SectionCardProps {
+  label: string;
+  children: React.ReactNode;
+}
+
+const SectionCard: React.FC<SectionCardProps> = ({ label, children }) => (
+  <View style={styles.card}>
+    <Text style={styles.cardLabel}>{label}</Text>
+    {children}
+  </View>
+);
+
+interface InfoRowProps {
   label: string;
   value: string;
   valueColor?: string;
-}) {
-  return (
-    <View style={styles.infoRow}>
-      <Text style={styles.infoKey}>{label}</Text>
-      <Text style={[styles.infoVal, valueColor ? { color: valueColor } : null]}>{value}</Text>
-    </View>
-  );
+  isLast?: boolean;
 }
 
+const InfoRow: React.FC<InfoRowProps> = ({ label, value, valueColor, isLast }) => (
+  <View style={[styles.infoRow, isLast && styles.infoRowLast]}>
+    <Text style={styles.infoKey}>{label}</Text>
+    <Text style={[styles.infoVal, valueColor ? { color: valueColor } : null]}>
+      {value}
+    </Text>
+  </View>
+);
+
+interface TimelineItemProps {
+  label: string;
+  date: string;
+  completed: boolean;
+  isLast: boolean;
+}
+
+const TimelineItem: React.FC<TimelineItemProps> = ({
+  label,
+  date,
+  completed,
+  isLast,
+}) => (
+  <View style={styles.tlItem}>
+    <View style={styles.tlSpine}>
+      <View style={[styles.tlDot, !completed && styles.tlDotDim]} />
+      {!isLast && <View style={styles.tlLine} />}
+    </View>
+    <View style={styles.tlContent}>
+      <Text style={[styles.tlLabel, !completed && styles.tlLabelDim]}>
+        {label}
+      </Text>
+      <Text style={styles.tlDate}>{date}</Text>
+    </View>
+  </View>
+);
+
+
+
+const ReferralScreen: React.FC<ReferralScreenProps> = ({
+  referral = DEFAULT_REFERRAL,
+  onBack,
+  onContactClinic,
+  onDownloadLetter,
+  onAddToCalendar,
+}) => {
+  const handleBack = () => {
+    if (onBack) onBack();
+    else console.log("Back tapped");
+  };
+
+  const handlePrimaryAction = () => {
+    if (referral.status === "approved") {
+      if (onAddToCalendar) onAddToCalendar();
+      else console.log("Add to calendar tapped");
+    } else {
+      if (onContactClinic) onContactClinic();
+      else console.log("Contact clinic tapped");
+    }
+  };
+
+  const handleDownload = () => {
+    if (onDownloadLetter) onDownloadLetter();
+    else console.log("Download referral letter tapped");
+  };
+
+  const isPending = referral.status === "pending";
+  const priorityColor = referral.priority === "Urgent" || referral.priority === "Emergency"
+    ? "#e6a817"
+    : "#2d7a4f";
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContainer}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── HEADER ── */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleBack} style={styles.backRow}>
+            <Text style={styles.backArrow}>←</Text>
+            <Text style={styles.backLabel}>My Referral</Text>
+          </TouchableOpacity>
+
+          <Text style={styles.headerTitle}>Specialist Referral</Text>
+          <Text style={styles.headerSub}>Issued by your doctor</Text>
+
+          <View style={styles.refIdPill}>
+            <Text style={styles.refIdText}>{referral.referralId}</Text>
+          </View>
+        </View>
+
+        {/* ── BODY ── */}
+        <View style={styles.body}>
+
+          {/* Status badge */}
+          <View style={styles.statusRow}>
+            <View
+              style={[
+                styles.statusBadge,
+                isPending ? styles.statusPending : styles.statusApproved,
+              ]}
+            >
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: isPending ? "#e6a817" : "#2d7a4f" },
+                ]}
+              />
+              <Text
+                style={[
+                  styles.statusText,
+                  { color: isPending ? "#e6a817" : "#2d7a4f" },
+                ]}
+              >
+                {isPending ? "Awaiting Approval" : "Approved"}
+              </Text>
+            </View>
+          </View>
+
+          {/* Specialist */}
+          <SectionCard label="REFERRED TO">
+            <View style={styles.specialistRow}>
+              <View style={styles.specialistAvatar}>
+                <Text style={styles.specialistAvatarText}>
+                  {referral.specialist.name.charAt(0)}
+                </Text>
+              </View>
+              <View style={styles.specialistInfo}>
+                <Text style={styles.specialistName}>
+                  {referral.specialist.name}
+                </Text>
+                <Text style={styles.specialistRole}>
+                  {referral.specialist.specialty}
+                </Text>
+                <Text style={styles.specialistClinic}>
+                  {referral.specialist.clinic}
+                </Text>
+              </View>
+            </View>
+          </SectionCard>
+
+          {/* Appointment details (approved only) */}
+          {!isPending && referral.appointment && (
+            <SectionCard label="APPOINTMENT">
+              <InfoRow label="Date" value={referral.appointment.date} />
+              <InfoRow label="Time" value={referral.appointment.time} />
+              <InfoRow label="Room" value={referral.appointment.room} />
+              <InfoRow label="Bring" value={referral.appointment.bringItems} isLast />
+            </SectionCard>
+          )}
+
+          {/* Referral details */}
+          <SectionCard label="REFERRAL DETAILS">
+            <InfoRow label="Referring doctor" value={referral.issuedBy} />
+            <InfoRow label="Issuing clinic" value={referral.issuingClinic} />
+            <InfoRow label="Date issued" value={referral.dateIssued} />
+            <InfoRow
+              label="Priority"
+              value={referral.priority}
+              valueColor={priorityColor}
+            />
+            <InfoRow label="Referred to" value={referral.specialist.clinic} isLast />
+          </SectionCard>
+
+          {/* Reason */}
+          <SectionCard label="REASON FOR REFERRAL">
+            <Text style={styles.reasonText}>{referral.reason}</Text>
+          </SectionCard>
+
+          {/* Timeline */}
+          <SectionCard label="STATUS TIMELINE">
+            <TimelineItem
+              label="Referral Issued"
+              date={`${referral.dateIssued} · 09:14`}
+              completed={true}
+              isLast={false}
+            />
+            <TimelineItem
+              label="Specialist Review"
+              date={isPending ? "Pending" : "30 Oct 2026 · 14:52"}
+              completed={!isPending}
+              isLast={false}
+            />
+            <TimelineItem
+              label="Appointment Scheduled"
+              date={
+                !isPending && referral.appointment
+                  ? `${referral.appointment.date} · ${referral.appointment.time}`
+                  : "Pending"
+              }
+              completed={!isPending && !!referral.appointment}
+              isLast={true}
+            />
+          </SectionCard>
+
+          {/* Primary action button */}
+          <TouchableOpacity style={styles.btnPrimary} onPress={handlePrimaryAction}>
+            <Text style={styles.btnPrimaryText}>
+              {isPending ? "Contact Specialist Clinic" : "Add to Calendar"}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Secondary action */}
+          <TouchableOpacity style={styles.btnOutline} onPress={handleDownload}>
+            <Text style={styles.btnOutlineText}>Download Referral Letter</Text>
+          </TouchableOpacity>
+
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+
+
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F4F7F6' },
-  container: { padding: 16, paddingBottom: 40 },
-  center: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, gap: 10 },
-  backRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
-  backLabel: { fontSize: 15, color: '#2D3A2B', fontWeight: '600' },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
+  safeArea: {
+    flex: 1,
+    backgroundColor: "#e8d5b7",
   },
-  title: { fontSize: 22, fontWeight: '700', color: '#1a1a1a' },
-  sub: { fontSize: 13, color: '#777', marginTop: 2 },
-  muted: { fontSize: 13, color: '#888' },
-  error: { color: '#C62828', marginBottom: 12 },
-  addBtn: {
-    backgroundColor: '#6B7C5C',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
+  scrollContainer: {
+    flexGrow: 1,
+    paddingBottom: 40,
   },
-  listCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
+
+  header: {
+    backgroundColor: "#d4b896",
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 24,
   },
-  listHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  listTitle: { fontSize: 16, fontWeight: '700', color: '#1a1a1a', flex: 1 },
-  listReason: { fontSize: 13, color: '#555', marginTop: 6 },
-  miniBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  miniBadgeText: { fontSize: 11, fontWeight: '700' },
-  badge: {
-    alignSelf: 'flex-start',
+  backRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 18,
+  },
+  backArrow: {
+    fontSize: 18,
+    color: "#1e2a3a",
+  },
+  backLabel: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#1e2a3a",
+  },
+  headerTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#1e2a3a",
+    marginBottom: 4,
+  },
+  headerSub: {
+    fontSize: 11,
+    color: "#1e2a3a",
+    opacity: 0.65,
+    letterSpacing: 0.4,
+  },
+  refIdPill: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(30,42,58,0.12)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    marginTop: 10,
+  },
+  refIdText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#1e2a3a",
+    letterSpacing: 0.8,
+  },
+
+  body: {
+    backgroundColor: "#f5ede0",
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 8,
+  },
+
+  statusRow: {
+    alignItems: "flex-end",
+    paddingVertical: 14,
+  },
+  statusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
     paddingHorizontal: 12,
     paddingVertical: 5,
-    borderRadius: 14,
-    marginBottom: 14,
+    borderRadius: 999,
   },
-  badgeText: { fontSize: 12, fontWeight: '700' },
+  statusPending: {
+    backgroundColor: "#fff8e6",
+  },
+  statusApproved: {
+    backgroundColor: "#e8f5ee",
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusText: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+  },
+
+  
   card: {
-    backgroundColor: '#fff',
+    backgroundColor: "#ffffff",
     borderRadius: 12,
     padding: 14,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#E8E8E8',
+    borderColor: "#e2ddd6",
   },
   cardLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#6B7C5C',
-    letterSpacing: 0.5,
-    marginBottom: 8,
+    fontSize: 9,
+    fontWeight: "700",
+    letterSpacing: 0.9,
+    color: "#888888",
+    marginBottom: 10,
   },
-  big: { fontSize: 17, fontWeight: '700', color: '#1a1a1a' },
-  bodyText: { fontSize: 14, color: '#333', lineHeight: 20 },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#EEE',
+
+  specialistRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
   },
-  infoKey: { fontSize: 13, color: '#777' },
-  infoVal: { fontSize: 13, fontWeight: '600', color: '#222', maxWidth: '60%', textAlign: 'right' },
-  primaryBtn: {
-    backgroundColor: '#6B7C5C',
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 8,
+  specialistAvatar: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: "#eae3d8",
+    borderWidth: 2,
+    borderColor: "#e2ddd6",
+    justifyContent: "center",
+    alignItems: "center",
   },
-  primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  outlineBtn: {
-    borderWidth: 1.5,
-    borderColor: '#6B7C5C',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 10,
-    marginHorizontal: 4,
+  specialistAvatarText: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#1e2a3a",
   },
-  outlineBtnText: { color: '#6B7C5C', fontWeight: '700', fontSize: 14 },
-  label: { fontSize: 13, fontWeight: '600', color: '#444', marginBottom: 6, marginTop: 10 },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+  specialistInfo: {
+    flex: 1,
+  },
+  specialistName: {
     fontSize: 14,
-    color: '#222',
+    fontWeight: "700",
+    color: "#1e2a3a",
   },
-  textarea: { minHeight: 90, textAlignVertical: 'top' },
-  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#EEE',
-    marginRight: 6,
-    marginBottom: 6,
+  specialistRole: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#7a8c3a",
+    marginTop: 1,
   },
-  chipOn: { backgroundColor: '#6B7C5C' },
-  chipText: { fontSize: 13, color: '#444', fontWeight: '600' },
-  chipTextOn: { color: '#fff' },
+  specialistClinic: {
+    fontSize: 11,
+    color: "#777e8a",
+    marginTop: 2,
+  },
+
+  infoRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e2ddd6",
+    gap: 12,
+  },
+  infoRowLast: {
+    borderBottomWidth: 0,
+    paddingBottom: 0,
+  },
+  infoKey: {
+    fontSize: 11,
+    color: "#777e8a",
+  },
+  infoVal: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#1e2a3a",
+    textAlign: "right",
+    flexShrink: 1,
+  },
+
+  reasonText: {
+    fontSize: 12,
+    color: "#1e2a3a",
+    lineHeight: 19,
+  },
+
+  tlItem: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "flex-start",
+  },
+  tlSpine: {
+    alignItems: "center",
+    width: 20,
+  },
+  tlDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#7a8c3a",
+    marginTop: 3,
+  },
+  tlDotDim: {
+    backgroundColor: "#e2ddd6",
+  },
+  tlLine: {
+    width: 2,
+    flex: 1,
+    backgroundColor: "#e2ddd6",
+    minHeight: 18,
+  },
+  tlContent: {
+    flex: 1,
+    paddingBottom: 16,
+  },
+  tlLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#1e2a3a",
+  },
+  tlLabelDim: {
+    color: "#777e8a",
+  },
+  tlDate: {
+    fontSize: 10,
+    color: "#777e8a",
+    marginTop: 2,
+  },
+
+  btnPrimary: {
+    width: "100%",
+    backgroundColor: "#1e2a3a",
+    borderRadius: 8,
+    paddingVertical: 14,
+    alignItems: "center",
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  btnPrimaryText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  btnOutline: {
+    width: "100%",
+    borderWidth: 1.5,
+    borderColor: "#1e2a3a",
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  btnOutlineText: {
+    color: "#1e2a3a",
+    fontSize: 13,
+    fontWeight: "600",
+  },
 });
+
+export default ReferralScreen;
