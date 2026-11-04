@@ -142,6 +142,13 @@ export default function NurseHomeScreen() {
               <Ionicons name="notifications-outline" size={22} color="#FF9800" />
               <Text style={styles.actionText}>Alerts</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.action}
+              onPress={() => navigation.navigate('Referral')}
+            >
+              <Ionicons name="swap-horizontal" size={22} color="#2E7D32" />
+              <Text style={styles.actionText}>Referrals</Text>
+            </TouchableOpacity>
           </View>
 
           {error ? (
