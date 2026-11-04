@@ -320,6 +320,29 @@ export async function notifyPatient(patientId: string, payload: PushPayload): Pr
 }
 
 /**
+ * Notify a staff member using their staff.id (not their user id).
+ * Never throws: a notification failure must not break the caller's save.
+ */
+export async function notifyStaff(staffId: string, payload: PushPayload): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from('staff')
+      .select('user_id')
+      .eq('id', staffId)
+      .maybeSingle();
+
+    if (error || !data?.user_id) {
+      console.warn('[Push] Could not resolve staff user for notification:', error?.message);
+      return false;
+    }
+    return await sendPushToUser(data.user_id as string, payload);
+  } catch (e) {
+    console.warn('[Push] notifyStaff failed:', e);
+    return false;
+  }
+}
+
+/**
  * Send an emergency alert push to a specific first responder.
  * Includes the alert's priority + location details via the payload data.
  */
@@ -353,5 +376,6 @@ export default {
   sendToExpoPushToken,
   sendPushToUser,
   notifyPatient,
+  notifyStaff,
   sendEmergencyToResponder,
 };
