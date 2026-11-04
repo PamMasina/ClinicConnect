@@ -1,276 +1,290 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  TextInput,
   ActivityIndicator,
-  Alert,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { useTheme } from '../../context/ThemeContext';
-import { supabase } from '../../services/supabase/client';
 import { RootStackParamList } from '../../navigation/types';
+import { clinicApi, Clinic } from '../../services/api/clinic';
+import { getBestLocation, calculateDistance } from '../../utils/location';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'BookAppointment'>;
 type RouteProp = import('@react-navigation/native').RouteProp<RootStackParamList, 'BookAppointment'>;
 
+interface ClinicWithDistance extends Clinic {
+  distanceKm?: number;
+}
+
+const formatDistance = (km: number) =>
+  km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
+
+/**
+ * Book Appointment (opened from Medical Records and anywhere else).
+ * Same clinic list as the main booking flow: nearest first, searchable,
+ * nothing pre-selected, one tap on a clinic moves on to choosing a service.
+ */
 export default function BookAppointmentScreen() {
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<RouteProp>();
-  const { theme } = useTheme();
-  const { clinicId } = route.params || {};
+  const presetClinicId = route.params?.clinicId;
 
-  const [loading, setLoading] = useState(true);
-  const [clinic, setClinic] = useState<any>(null);
-  const [clinics, setClinics] = useState<any[]>([]);
-  const [selectedClinicId, setSelectedClinicId] = useState<string | null>(
-    clinicId && clinicId.length > 0 ? clinicId : null
+  const [clinics, setClinics] = useState<ClinicWithDistance[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [locationNote, setLocationNote] = useState<string | null>(null);
+
+  const goToServices = useCallback(
+    (clinic: Pick<Clinic, 'id' | 'clinic_name'>, replace = false) => {
+      const params = { clinicId: clinic.id, clinicName: clinic.clinic_name };
+      if (replace) navigation.replace('SelectService', params);
+      else navigation.navigate('SelectService', params);
+    },
+    [navigation]
   );
 
-  useEffect(() => {
-    if (clinicId && clinicId.length > 0) {
-      fetchClinicDetails(clinicId);
-    } else {
-      fetchAllClinics();
-    }
-  }, [clinicId]);
-
-  const fetchClinicDetails = async (id: string) => {
+  const fetchClinics = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from('clinics')
-        .select('*')
-        .eq('id', id)
-        .single();
+      setError(null);
+      setLocationNote(null);
 
-      if (error) throw error;
-      setClinic(data);
-      setSelectedClinicId(data.id);
-    } catch (error) {
-      console.error('Error fetching clinic:', error);
-      Alert.alert('Error', 'Failed to load clinic details');
-    } finally {
-      setLoading(false);
-    }
-  };
+      const data = await clinicApi.getAll();
 
-  const fetchAllClinics = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('clinics')
-        .select('*')
-        .eq('status', 'active')
-        .order('clinic_name');
-
-      if (error) throw error;
-      setClinics(data || []);
-      if (data && data.length > 0 && !selectedClinicId) {
-        setSelectedClinicId(data[0].id);
+      // Opened for one specific clinic: skip the list.
+      if (presetClinicId) {
+        const match = data.find((c) => c.id === presetClinicId);
+        if (match) {
+          goToServices(match, true);
+          return;
+        }
       }
-    } catch (error) {
-      console.error('Error fetching clinics:', error);
-      Alert.alert('Error', 'Failed to load clinics');
+
+      let list: ClinicWithDistance[] = data;
+      try {
+        const loc = await getBestLocation();
+        list = data.map((c) =>
+          c.latitude && c.longitude
+            ? { ...c, distanceKm: calculateDistance(loc.latitude, loc.longitude, c.latitude, c.longitude) }
+            : c
+        );
+        list.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+      } catch {
+        setLocationNote('Location unavailable, so clinics are listed alphabetically.');
+      }
+      setClinics(list);
+    } catch (e) {
+      console.error('Failed to fetch clinics:', e);
+      setError('Unable to load clinics. Please try again.');
     } finally {
-      setLoading(false);
+      setIsLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, [presetClinicId, goToServices]);
 
-  const goToServices = (id: string, name?: string) => {
-    navigation.navigate('SelectService', {
-      clinicId: id,
-      clinicName: name,
-    });
-  };
+  useEffect(() => {
+    fetchClinics();
+  }, [fetchClinics]);
 
-  if (loading) {
-    return (
-      <SafeAreaView style={[styles.container, { backgroundColor: theme.colors.background }]}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#6B7C5C" />
-          <Text style={styles.loadingText}>Loading...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  const q = searchQuery.trim().toLowerCase();
+  const filtered = clinics.filter(
+    (c) =>
+      !q ||
+      c.clinic_name.toLowerCase().includes(q) ||
+      (c.address || '').toLowerCase().includes(q) ||
+      (c.location || '').toLowerCase().includes(q)
+  );
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.colors.background }]}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color="#333" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Book Appointment</Text>
-        <View style={{ width: 40 }} />
-      </View>
+    <LinearGradient
+      colors={['#B08968', '#FFFFFF', '#FFFFFF']}
+      locations={[0, 0.3, 0.6]}
+      style={styles.root}
+    >
+      <SafeAreaView style={styles.safeArea}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => {
+                setRefreshing(true);
+                fetchClinics();
+              }}
+              colors={['#6B7C5C']}
+            />
+          }
+        >
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+            <Ionicons name="arrow-back" size={20} color="#FFF" />
+          </TouchableOpacity>
 
-      <ScrollView contentContainerStyle={styles.content}>
-        {clinic ? (
-          <View>
-            <View style={styles.clinicCard}>
-              <View style={styles.clinicIconWrap}>
-                <Ionicons name="business" size={28} color="#6B7C5C" />
-              </View>
-              <Text style={styles.clinicName}>{clinic.clinic_name}</Text>
-              <Text style={styles.clinicAddress}>
-                {clinic.address || clinic.location || 'Address not available'}
-              </Text>
-              {clinic.phone ? (
-                <Text style={styles.clinicPhone}>{clinic.phone}</Text>
-              ) : null}
-            </View>
-            <TouchableOpacity
-              style={styles.continueButton}
-              onPress={() => goToServices(clinic.id, clinic.clinic_name)}
-            >
-              <Text style={styles.continueButtonText}>Continue</Text>
-              <Ionicons name="arrow-forward" size={20} color="#FFF" />
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.selectClinic}>
-            <Text style={styles.selectTitle}>Select a Clinic</Text>
-            <Text style={styles.selectSubtitle}>
-              Choose where you would like to book your appointment
-            </Text>
+          <Text style={styles.title}>Book an appointment</Text>
+          <Text style={styles.stepText}>Step 1 of 4 - Clinic</Text>
 
-            {clinics.length === 0 ? (
-              <Text style={styles.emptyText}>No active clinics available</Text>
-            ) : (
-              clinics.map((item) => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={[
-                    styles.clinicOption,
-                    selectedClinicId === item.id && styles.clinicOptionSelected,
-                  ]}
-                  onPress={() => setSelectedClinicId(item.id)}
-                >
-                  <View style={styles.clinicOptionRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.clinicOptionName,
-                          selectedClinicId === item.id && styles.clinicOptionNameSelected,
-                        ]}
-                      >
-                        {item.clinic_name}
-                      </Text>
-                      <Text style={styles.clinicOptionAddress}>
-                        {item.location || item.address || ''}
-                      </Text>
-                    </View>
-                    {selectedClinicId === item.id && (
-                      <Ionicons name="checkmark-circle" size={22} color="#6B7C5C" />
-                    )}
-                  </View>
-                </TouchableOpacity>
-              ))
-            )}
-
-            {selectedClinicId && (
-              <TouchableOpacity
-                style={styles.continueButton}
-                onPress={() => {
-                  const selected = clinics.find((c) => c.id === selectedClinicId);
-                  goToServices(selectedClinicId, selected?.clinic_name);
-                }}
-              >
-                <Text style={styles.continueButtonText}>Continue</Text>
-                <Ionicons name="arrow-forward" size={20} color="#FFF" />
+          <View style={styles.searchContainer}>
+            <Ionicons name="search-outline" size={18} color="#999" style={styles.searchIcon} />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search clinics by name or area..."
+              placeholderTextColor="#999"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={8}>
+                <Ionicons name="close-circle" size={18} color="#BDBDBD" />
               </TouchableOpacity>
             )}
           </View>
-        )}
-      </ScrollView>
-    </SafeAreaView>
+
+          <Text style={styles.sectionLabel}>
+            {isLoading ? 'SELECT CLINIC' : `SELECT CLINIC · ${filtered.length} FOUND`}
+          </Text>
+          {locationNote ? <Text style={styles.note}>{locationNote}</Text> : null}
+
+          <View style={styles.listCard}>
+            {isLoading && (
+              <View style={styles.stateContainer}>
+                <ActivityIndicator size="large" color="#6B7C5C" />
+                <Text style={styles.stateText}>Loading clinics...</Text>
+              </View>
+            )}
+
+            {!isLoading && error && (
+              <View style={styles.stateContainer}>
+                <Ionicons name="alert-circle-outline" size={40} color="#E53935" />
+                <Text style={styles.stateText}>{error}</Text>
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  onPress={() => {
+                    setIsLoading(true);
+                    fetchClinics();
+                  }}
+                >
+                  <Text style={styles.retryButtonText}>Try Again</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {!isLoading && !error && filtered.length === 0 && (
+              <View style={styles.stateContainer}>
+                <Ionicons name="business-outline" size={40} color="#CCC" />
+                <Text style={styles.stateText}>
+                  {searchQuery ? 'No clinics match your search' : 'No clinics available right now'}
+                </Text>
+              </View>
+            )}
+
+            {!isLoading &&
+              !error &&
+              filtered.map((clinic, index) => (
+                <TouchableOpacity
+                  key={clinic.id}
+                  style={[styles.clinicRow, index === filtered.length - 1 && styles.clinicRowLast]}
+                  onPress={() => goToServices(clinic)}
+                  activeOpacity={0.75}
+                >
+                  <View style={styles.clinicIcon}>
+                    <Ionicons name="medical-outline" size={20} color="#6B7C5C" />
+                  </View>
+                  <View style={styles.clinicInfo}>
+                    <Text style={styles.clinicName}>{clinic.clinic_name}</Text>
+                    <Text style={styles.clinicMeta} numberOfLines={1}>
+                      {clinic.location || clinic.address || ''}
+                    </Text>
+                    {clinic.operating_hours ? (
+                      <Text style={styles.clinicHours} numberOfLines={1}>
+                        {clinic.operating_hours}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {clinic.distanceKm != null && (
+                    <Text style={styles.clinicDistance}>{formatDistance(clinic.distanceKm)}</Text>
+                  )}
+                  <Ionicons name="chevron-forward" size={18} color="#BDBDBD" />
+                </TouchableOpacity>
+              ))}
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  loadingContainer: {
-    flex: 1,
+  root: { flex: 1 },
+  safeArea: { flex: 1 },
+  scrollContent: { padding: 16, paddingBottom: 40 },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.25)',
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  loadingText: { marginTop: 12, fontSize: 14, color: '#666' },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  backButton: { padding: 8 },
-  headerTitle: { fontSize: 18, fontWeight: '600', color: '#1a1a1a' },
-  content: { padding: 16, flexGrow: 1 },
-  clinicCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  clinicIconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#F0F4EC',
-    alignItems: 'center',
-    justifyContent: 'center',
     marginBottom: 12,
   },
-  clinicName: { fontSize: 18, fontWeight: '600', color: '#1a1a1a', textAlign: 'center' },
-  clinicAddress: { fontSize: 14, color: '#666', marginTop: 6, textAlign: 'center' },
-  clinicPhone: { fontSize: 14, color: '#666', marginTop: 4 },
-  selectClinic: { flex: 1 },
-  selectTitle: { fontSize: 20, fontWeight: '600', color: '#1a1a1a', marginBottom: 8 },
-  selectSubtitle: { fontSize: 14, color: '#666', marginBottom: 20 },
-  clinicOption: {
+  title: { fontSize: 24, fontWeight: '700', color: '#FFF' },
+  stepText: { fontSize: 13, color: '#FFFFFFCC', marginTop: 4, marginBottom: 20 },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#FFF',
-    borderRadius: 10,
-    padding: 16,
-    marginBottom: 10,
+    borderRadius: 24,
+    paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: '#E8E8E8',
+    borderColor: '#E0E0E0',
+    marginBottom: 18,
   },
-  clinicOptionSelected: {
-    borderColor: '#6B7C5C',
-    backgroundColor: '#F0F4EC',
+  searchIcon: { marginRight: 8 },
+  searchInput: { flex: 1, paddingVertical: 12, fontSize: 14, color: '#333' },
+  sectionLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.6, color: '#333', marginBottom: 8 },
+  note: { fontSize: 12, color: '#888', marginBottom: 8 },
+  listCard: {
+    backgroundColor: '#FFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    overflow: 'hidden',
   },
-  clinicOptionRow: {
+  stateContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, paddingHorizontal: 16 },
+  stateText: { fontSize: 14, color: '#666', marginTop: 10, textAlign: 'center' },
+  retryButton: { marginTop: 14, backgroundColor: '#6B7C5C', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
+  retryButtonText: { color: '#FFF', fontWeight: '600' },
+  clinicRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F0F0F0',
+    gap: 12,
   },
-  clinicOptionName: { fontSize: 16, fontWeight: '500', color: '#1a1a1a' },
-  clinicOptionNameSelected: { color: '#6B7C5C' },
-  clinicOptionAddress: { fontSize: 13, color: '#666', marginTop: 2 },
-  continueButton: {
-    backgroundColor: '#6B7C5C',
+  clinicRowLast: { borderBottomWidth: 0 },
+  clinicIcon: {
+    width: 40,
+    height: 40,
     borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 20,
-    flexDirection: 'row',
+    backgroundColor: '#6B7C5C15',
     justifyContent: 'center',
-    gap: 8,
+    alignItems: 'center',
   },
-  continueButtonText: { fontSize: 16, fontWeight: '600', color: '#FFF' },
-  emptyText: {
-    textAlign: 'center',
-    color: '#888',
-    fontSize: 14,
-    marginTop: 24,
-  },
+  clinicInfo: { flex: 1 },
+  clinicName: { fontSize: 15, fontWeight: '600', color: '#1a1a1a' },
+  clinicMeta: { fontSize: 13, color: '#666', marginTop: 2 },
+  clinicHours: { fontSize: 12, color: '#999', marginTop: 2 },
+  clinicDistance: { fontSize: 12, fontWeight: '600', color: '#6B7C5C' },
 });
